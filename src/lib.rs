@@ -1,87 +1,98 @@
-pub use render::{RenderChain, Renderer};
-pub use update::{UpdateChain, Updater};
-
-pub struct Application<B, D> {
-    backend: B,
-    update_chain: UpdateChain<B, D>,
-    render_chain: RenderChain<B, D>,
+pub struct Game<Bk, Scn> 
+where
+    Bk: backend::Backend<Scn>,
+    Scn: Scene,
+{
+    backend: Bk,
+    update_chain: backend::UpdateChain<Bk::Context, Scn>,
+    render_chain: backend::RenderChain<Bk::Screen, Scn>,
 }
 
-pub trait Data
+pub trait Scene
 where
     Self: Sized,
 {
-    // TODO: Unimplement this and make scenes implement this explicitly, then try to make a custom
-    // derive for this trait.
     fn alive(&self) -> bool {
         true
     }
 }
 
-pub trait Backend<D>
+impl<Bk, Scn> Game<Bk, Scn>
 where
-    Self: Sized,
-    D: Data,
+    Bk: backend::Backend<Scn>,
+    Scn: Scene,
 {
-    fn run(
-        self,
-        UpdateChain<Self, D>,
-        RenderChain<Self, D>,
-        D
-    ) -> D;
-    fn quit(&mut self);
-}
-
-impl<B, D> Application<B, D>
-where
-    B: Backend<D>,
-    D: Data,
-{
-    pub fn new(backend: B) -> Self {
+    pub fn new(backend: Bk) -> Self {
         Self {
             backend,
-            update_chain: UpdateChain::default(),
-            render_chain: RenderChain::default(),
+            update_chain: backend::UpdateChain::default(),
+            render_chain: backend::RenderChain::default(),
         }
     }
 
-    pub fn run(self, data: D) -> D {
-        let Application {
+    pub fn run(self, scene: Scn) -> Scn {
+        let Game {
             backend,
             update_chain,
             render_chain,
         } = self;
 
-        backend.run(update_chain, render_chain, data)
+        backend.run(update_chain, render_chain, scene)
     }
 
-    pub fn add_updater<U: 'static + Updater<B, D>>(mut self, updater: U) -> Self {
+    pub fn add_updater<U: 'static + Updater<Bk::Context, Scn>>(mut self, updater: U) -> Self {
         self.update_chain.add(updater);
         self
     }
 
-    pub fn add_renderer<R: 'static + Renderer<B, D>>(mut self, renderer: R) -> Self {
+    pub fn add_renderer<R: 'static + Renderer<Bk::Screen, Scn>>(mut self, renderer: R) -> Self {
         self.render_chain.add(renderer);
         self
     }
 }
 
-pub mod update {
-    use Backend;
-    use Data;
+pub trait Updater<Ctx, Scn>
+where
+    Scn: Scene,
+{
+    fn update(&mut self, context: &mut Ctx, scene: &mut Scn);
+}
 
-    pub trait Updater<B, D>
+pub trait Renderer<Scr, Scn>
+where
+    Scn: Scene,
+{
+    fn render(&mut self, screen: &mut Scr, scene: &Scn);
+}
+
+pub mod backend {
+    use Scene;
+    use Updater;
+    use Renderer;
+
+    pub trait Backend<Scn>
     where
-        D: Data,
+        Self: Sized,
+        Scn: Scene,
     {
-        fn update(&mut self, backend: &mut B, data: &mut D);
+        type Context;
+        type Screen;
+
+        fn run(
+            self,
+            UpdateChain<Self::Context, Scn>,
+            RenderChain<Self::Screen, Scn>,
+            Scn
+        ) -> Scn;
+
+        fn quit(&mut self);
     }
 
-    pub struct UpdateChain<B, D> {
-        updaters: Vec<Box<Updater<B, D>>>,
+    pub struct UpdateChain<Ctx, Scn> {
+        updaters: Vec<Box<Updater<Ctx, Scn>>>,
     }
 
-    impl<B, D> Default for UpdateChain<B, D> {
+    impl<Ctx, Scn> Default for UpdateChain<Ctx, Scn> {
         fn default() -> Self {
             Self {
                 updaters: Vec::new(),
@@ -89,38 +100,25 @@ pub mod update {
         }
     }
 
-    impl<B, D> UpdateChain<B, D>
+    impl<Ctx, Scn> UpdateChain<Ctx, Scn>
     where
-        B: Backend<D>,
-        D: Data,
+        Scn: Scene,
     {
-        pub fn add<U: 'static + Updater<B, D>>(&mut self, updater: U) {
+        pub fn add<U: 'static + Updater<Ctx, Scn>>(&mut self, updater: U) {
             self.updaters.push(Box::new(updater));
         }
-        pub fn update(&mut self, mut backend: &mut B, data: &mut D) {
+        pub fn update(&mut self, context: &mut Ctx, scene: &mut Scn) {
             for u in self.updaters.iter_mut() {
-                u.update(&mut backend, data);
+                u.update(context, scene);
             }
         }
     }
-}
 
-mod render {
-    use Backend;
-    use Data;
-
-    pub trait Renderer<B, D>
-    where
-        D: Data,
-    {
-        fn render(&mut self, backend: &mut B, data: &D);
+    pub struct RenderChain<Scr, Scn> {
+        renderers: Vec<Box<Renderer<Scr, Scn>>>,
     }
 
-    pub struct RenderChain<B, D> {
-        renderers: Vec<Box<Renderer<B, D>>>,
-    }
-
-    impl<B, D> Default for RenderChain<B, D> {
+    impl<Scr, Scn> Default for RenderChain<Scr, Scn> {
         fn default() -> Self {
             Self {
                 renderers: Vec::new(),
@@ -128,51 +126,55 @@ mod render {
         }
     }
 
-    impl<B, D> RenderChain<B, D>
+    impl<Scr, Scn> RenderChain<Scr, Scn>
     where
-        B: Backend<D>,
-        D: Data,
+        Scn: Scene,
     {
-        pub fn add<R: 'static + Renderer<B, D>>(&mut self, renderer: R) {
+        pub fn add<R: 'static + Renderer<Scr, Scn>>(&mut self, renderer: R) {
             self.renderers.push(Box::new(renderer));
         }
-        pub fn render(&mut self, mut backend: &mut B, data: &D) {
+        pub fn render(&mut self, screen: &mut Scr, scene: &Scn) {
             for r in self.renderers.iter_mut() {
-                r.render(&mut backend, data);
+                r.render(screen, scene);
             }
         }
     }
 }
 
-pub mod dummy {
-    pub struct DummyBackend<D> {
+pub mod dummy_backend {
+    use backend::{Backend, UpdateChain, RenderChain};
+
+    pub struct DummyBackend<Scn> {
         must_quit: bool,
-        _data: Option<D>,
+        _data: Option<Scn>,
     }
 
-    impl<D> DummyBackend<D> {
+    impl<Scn> DummyBackend<Scn> {
         pub fn new() -> Self {
             Self { must_quit: false, _data: None }
         }
     }
 
-    impl<D> super::Backend<D> for DummyBackend<D>
+    impl<Scn> Backend<Scn> for DummyBackend<Scn>
     where 
         Self: Sized,
-        D: super::Data,
+        Scn: super::Scene,
     {
+        type Context = ();
+        type Screen = ();
+
         fn run(
-            mut self,
-            mut uc: super::UpdateChain<Self, D>,
-            mut rc: super::RenderChain<Self, D>,
-            mut data: D
-        ) -> D {
+            self,
+            mut uc: UpdateChain<(), Scn>,
+            mut rc: RenderChain<(), Scn>,
+            mut data: Scn
+        ) -> Scn {
             while !self.must_quit {
-                uc.update(&mut self, &mut data);
+                uc.update(&mut (), &mut data);
                 if self.must_quit {
                     return data
                 }
-                rc.render(&mut self, &data);
+                rc.render(&mut (), &data);
             }
             data
         }
